@@ -31,6 +31,23 @@ func run(name string, args ...string) (string, error) {
 	return string(out), err
 }
 
+// tunnelPID — номер процесса туннеля (0, если не запущен); смена номера = туннель перезапускался.
+func tunnelPID() int {
+	out, err := run("launchctl", "print", tunnelLabel())
+	if err != nil {
+		return 0
+	}
+	for _, l := range strings.Split(out, "\n") {
+		l = strings.TrimSpace(l)
+		if strings.HasPrefix(l, "pid = ") {
+			var n int
+			fmt.Sscanf(strings.TrimPrefix(l, "pid = "), "%d", &n)
+			return n
+		}
+	}
+	return 0
+}
+
 func tunnelRunning() bool {
 	_, err := run("launchctl", "print", tunnelLabel())
 	return err == nil

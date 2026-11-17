@@ -60,6 +60,20 @@ func svcState() string {
 
 func tunnelRunning() bool { return svcState() == "RUNNING" }
 
+// tunnelPID — номер процесса службы (0, если не запущена); смена номера = служба перезапускалась.
+func tunnelPID() int {
+	out, _ := run("sc.exe", "queryex", svcName)
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "PID") {
+			f := strings.Fields(l)
+			var n int
+			fmt.Sscanf(f[len(f)-1], "%d", &n)
+			return n
+		}
+	}
+	return 0
+}
+
 func waitState(want string, d time.Duration) bool {
 	end := time.Now().Add(d)
 	for time.Now().Before(end) {

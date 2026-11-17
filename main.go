@@ -252,6 +252,7 @@ func updateMenu() {
 		mSpeedD.SetTitle("Напрямую: " + d)
 		mSpeedD.Show()
 	}
+	updateMonitorMenu()
 	if guardOn() {
 		mGuard.Check()
 	} else {
@@ -313,6 +314,7 @@ func onReady() {
 	mSpeedD = tray.AddMenuItem("", "")
 	mSpeedD.Disable()
 	mSpeedD.Hide()
+	addMonitorMenu()
 	for _, p := range listProfiles() {
 		it := mServer.AddSubMenuItemCheckbox(profileTitle(p), "", false)
 		profileItems[p] = it
@@ -434,6 +436,7 @@ func onReady() {
 
 	go loop()
 	go updateLoop()
+	go monitorLoop()
 }
 
 func reloadProfilesHint() {
@@ -468,6 +471,7 @@ func vpnEnable() {
 	}
 	defer endBusy()
 	setInfo("")
+	connLog("пользователь: «Включить VPN»")
 	if err := startTunnel(); err != nil {
 		setInfo("Туннель не запустился: " + err.Error())
 		refresh()
@@ -492,6 +496,7 @@ func vpnDisable() {
 		return
 	}
 	defer endBusy()
+	connLog("пользователь: «Выключить VPN»")
 	setGuard(false)
 	if err := setProxy(false); err != nil {
 		setInfo("Прокси: " + err.Error())
@@ -537,6 +542,7 @@ func switchProfile(name string) {
 		setInfo("Не записать конфиг: " + err.Error())
 		return
 	}
+	connLog("пользователь: переключение на сервер %s", name)
 	if err := restartTunnel(); err != nil {
 		log.Println("restart:", err)
 	}
@@ -630,11 +636,13 @@ func guardPass(force bool) {
 	}
 	if !tunnelRunning() {
 		log.Println("guard: туннель остановлен — запускаю")
+		connLog("сторож: туннель был остановлен — запускаю")
 		_ = startTunnel()
 		time.Sleep(3 * time.Second)
 	}
 	if on, _ := proxyState(); !on {
 		log.Println("guard: прокси выключен — включаю")
+		connLog("сторож: системный прокси был выключен — включаю")
 		if err := setProxy(true); err != nil {
 			log.Println("guard: прокси:", err)
 		}
@@ -643,6 +651,7 @@ func guardPass(force bool) {
 		tunnelFails++
 		if tunnelFails >= 2 && hasNetwork() {
 			log.Println("guard: туннель не отвечает — перезапуск")
+			connLog("сторож: туннель не отвечает — перезапускаю")
 			_ = restartTunnel()
 			tunnelFails = 0
 		}
@@ -728,6 +737,7 @@ func diagnose() {
 	speedMu.Unlock()
 	b.WriteString("\n--- система ---\n")
 	b.WriteString(platformDiag())
+	b.WriteString(monitorReport())
 	b.WriteString("\n--- журнал приложения (последние строки) ---\n")
 	b.WriteString(tailFile(filepath.Join(configDir(), "control.log"), 25))
 	report := redact(b.String())
