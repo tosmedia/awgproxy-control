@@ -157,7 +157,8 @@ func refresh() Status {
 
 var (
 	mStatus, mDirect, mInfo        *tray.MenuItem
-	mToggle, mGuard, mServer       *tray.MenuItem
+	mOn, mOff, mGuard, mServer     *tray.MenuItem
+	mSpeed, mSpeedT, mSpeedD       *tray.MenuItem
 	mDiag, mFolder, mSetup, mLogin *tray.MenuItem
 	mQuit, mUpdate, mAutoUpd       *tray.MenuItem
 	profileItems                   = map[string]*tray.MenuItem{}
@@ -180,6 +181,9 @@ func updateMenu() {
 
 	var icon []byte
 	switch {
+	case busy.Load() && busyWhat != "":
+		mStatus.SetTitle("… " + busyWhat)
+		icon = iconYellow
 	case s.Checked.IsZero():
 		mStatus.SetTitle("Проверяю…")
 		icon = iconGray
@@ -216,10 +220,37 @@ func updateMenu() {
 	} else {
 		mInfo.Hide()
 	}
-	if vpnOn(s) {
-		mToggle.SetTitle("Выключить VPN")
+	// отдельные пункты «Включить» и «Выключить»; пока идёт действие — оба недоступны
+	if busy.Load() {
+		mOn.Disable()
+		mOff.Disable()
 	} else {
-		mToggle.SetTitle("Включить VPN")
+		if vpnOn(s) && s.TunnelIP != "" && s.ProxyOn {
+			mOn.Disable()
+		} else {
+			mOn.Enable()
+		}
+		if vpnOn(s) {
+			mOff.Enable()
+		} else {
+			mOff.Disable()
+		}
+	}
+	if speedBusy.Load() {
+		mSpeed.Disable()
+	} else {
+		mSpeed.Enable()
+	}
+	speedMu.Lock()
+	t, d := speedTunnel, speedDirect
+	speedMu.Unlock()
+	if t != "" {
+		mSpeedT.SetTitle("Через Армению: " + t)
+		mSpeedT.Show()
+	}
+	if d != "" {
+		mSpeedD.SetTitle("Напрямую: " + d)
+		mSpeedD.Show()
 	}
 	if guardOn() {
 		mGuard.Check()
@@ -270,10 +301,18 @@ func onReady() {
 	mInfo.Disable()
 	mInfo.Hide()
 	tray.AddSeparator()
-	mToggle = tray.AddMenuItem("Выключить VPN", "Туннель и системный прокси вместе")
+	mOn = tray.AddMenuItem("Включить VPN", "Запустить туннель и включить системный прокси")
+	mOff = tray.AddMenuItem("Выключить VPN", "Остановить туннель и выключить системный прокси")
 	mGuard = tray.AddMenuItemCheckbox("Всегда через Армению (сторож)",
 		"В любой сети сам включает прокси и перезапускает туннель", guardOn())
 	mServer = tray.AddMenuItem("Сервер", "")
+	mSpeed = tray.AddMenuItem("Тест скорости", "Скорость и пинг через Армению и напрямую")
+	mSpeedT = tray.AddMenuItem("", "")
+	mSpeedT.Disable()
+	mSpeedT.Hide()
+	mSpeedD = tray.AddMenuItem("", "")
+	mSpeedD.Disable()
+	mSpeedD.Hide()
 	for _, p := range listProfiles() {
 		it := mServer.AddSubMenuItemCheckbox(profileTitle(p), "", false)
 		profileItems[p] = it
@@ -303,8 +342,18 @@ func onReady() {
 	updateMenu()
 
 	go func() {
-		for range mToggle.ClickedCh {
-			go toggleVPN()
+		for range mOn.ClickedCh {
+			go vpnEnable()
+		}
+	}()
+	go func() {
+		for range mOff.ClickedCh {
+			go vpnDisable()
+		}
+	}()
+	go func() {
+		for range mSpeed.ClickedCh {
+			go speedTest()
 		}
 	}()
 	go func() {
@@ -395,33 +444,37 @@ func reloadProfilesHint() {
 
 // ---------- действия ----------
 
-func toggleVPN() {
+// busyWhat — что сейчас делается (показывается вместо статуса, значок жёлтый).
+var busyWhat string
+
+func startBusy(what string) bool {
 	if !busy.CompareAndSwap(false, true) {
+		return false
+	}
+	busyWhat = what
+	updateMenu()
+	return true
+}
+
+func endBusy() {
+	busyWhat = ""
+	busy.Store(false)
+	updateMenu()
+}
+
+func vpnEnable() {
+	if !startBusy("Включаю VPN, жду ответа сервера (до 25 с)…") {
 		return
 	}
-	defer busy.Store(false)
-	s := refresh()
-	if vpnOn(s) {
-		setGuard(false)
-		setInfo("Выключаю…")
-		if err := setProxy(false); err != nil {
-			setInfo("Прокси: " + err.Error())
-		}
-		if err := stopTunnel(); err != nil {
-			setInfo("Туннель: " + err.Error())
-		} else {
-			setInfo("VPN выключен")
-		}
-		refresh()
-		return
-	}
-	setInfo("Включаю…")
+	defer endBusy()
+	setInfo("")
 	if err := startTunnel(); err != nil {
 		setInfo("Туннель не запустился: " + err.Error())
 		refresh()
 		return
 	}
-	if ip := waitTunnel(25 * time.Second); ip == "" {
+	ip := waitTunnel(25 * time.Second)
+	if ip == "" {
 		setInfo("Сервер не ответил за 25 с — прокси не включаю, чтобы не пропал интернет")
 		refresh()
 		return
@@ -429,7 +482,24 @@ func toggleVPN() {
 	if err := setProxy(true); err != nil {
 		setInfo("Прокси: " + err.Error())
 	} else {
-		setInfo("")
+		setInfo("Готово: VPN включён, IP " + ip)
+	}
+	refresh()
+}
+
+func vpnDisable() {
+	if !startBusy("Выключаю VPN…") {
+		return
+	}
+	defer endBusy()
+	setGuard(false)
+	if err := setProxy(false); err != nil {
+		setInfo("Прокси: " + err.Error())
+	}
+	if err := stopTunnel(); err != nil {
+		setInfo("Туннель: " + err.Error())
+	} else {
+		setInfo("VPN выключен (сторож тоже выключен)")
 	}
 	refresh()
 }
@@ -446,10 +516,10 @@ func waitTunnel(d time.Duration) string {
 }
 
 func switchProfile(name string) {
-	if !busy.CompareAndSwap(false, true) {
+	if !startBusy("Переключаю сервер…") {
 		return
 	}
-	defer busy.Store(false)
+	defer endBusy()
 	src := filepath.Join(profilesDir(), name+".conf")
 	data, err := os.ReadFile(src)
 	if err != nil {
@@ -653,6 +723,9 @@ func diagnose() {
 	fmt.Fprintf(&b, "Активный профиль: %s; Endpoint в рабочем конфиге: %s\n", orDash(s.Profile), orDash(endpointOf(activeConf())))
 	fmt.Fprintf(&b, "Профили: %s\n", strings.Join(listProfiles(), ", "))
 	fmt.Fprintf(&b, "Сети: %s\n", netSignature())
+	speedMu.Lock()
+	fmt.Fprintf(&b, "Последний тест скорости: через Армению %s; напрямую %s\n", orDash(speedTunnel), orDash(speedDirect))
+	speedMu.Unlock()
 	b.WriteString("\n--- система ---\n")
 	b.WriteString(platformDiag())
 	b.WriteString("\n--- журнал приложения (последние строки) ---\n")

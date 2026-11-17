@@ -125,10 +125,10 @@ func checkUpdate(manual bool) {
 }
 
 func installRelease(r *release) {
-	if !busy.CompareAndSwap(false, true) {
+	if !startBusy("Обновляю приложение…") {
 		return
 	}
-	defer busy.Store(false)
+	defer endBusy()
 	name := updateAssetName()
 	url := r.asset(name)
 	sumsURL := r.asset("SHA256SUMS")
