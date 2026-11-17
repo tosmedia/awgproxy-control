@@ -1,0 +1,55 @@
+# Каждый push в main: сборка для macOS (Apple Silicon) и Windows и новый релиз 1.1.<номер сборки>.
+# Приложение само проверяет последний релиз и обновляется.
+name: release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.12'
+          cache: false
+      - name: Сборка
+        run: |
+          set -ex
+          V="1.1.${{ github.run_number }}"
+          echo "V=$V" >> "$GITHUB_ENV"
+          go mod tidy
+          LD="-s -w -X main.version=$V"
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$LD" -o awgctl .
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$LD -H=windowsgui" -o AWGProxy-Control-windows-amd64.exe .
+          [ "$(head -c2 AWGProxy-Control-windows-amd64.exe)" = "MZ" ]
+          APP="AWGProxy Control.app"
+          mkdir -p "$APP/Contents/MacOS"
+          cp awgctl "$APP/Contents/MacOS/awgctl"
+          chmod 755 "$APP/Contents/MacOS/awgctl"
+          [ "$(od -An -tx1 -N4 "$APP/Contents/MacOS/awgctl" | tr -d ' ')" = "cffaedfe" ]
+          printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0"><dict>' \
+            '<key>CFBundleName</key><string>AWGProxy Control</string>' \
+            '<key>CFBundleIdentifier</key><string>com.awgproxy.control</string>' \
+            '<key>CFBundleExecutable</key><string>awgctl</string>' \
+            '<key>CFBundlePackageType</key><string>APPL</string>' \
+            "<key>CFBundleShortVersionString</key><string>$V</string>" \
+            "<key>CFBundleVersion</key><string>$V</string>" \
+            '<key>LSUIElement</key><true/>' \
+            '<key>LSMinimumSystemVersion</key><string>11.0</string>' \
+            '</dict></plist>' > "$APP/Contents/Info.plist"
+          zip -r -X AWGProxy-Control-mac-arm64.zip "$APP"
+          sha256sum AWGProxy-Control-mac-arm64.zip AWGProxy-Control-windows-amd64.exe | tee SHA256SUMS
+      - name: Релиз
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$V" AWGProxy-Control-mac-arm64.zip AWGProxy-Control-windows-amd64.exe SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --title "AWGProxy Control $V" \
+            --notes "Сборка ${GITHUB_SHA::7}. Приложение обновится само (меню → «Обновлять автоматически»)." --latest
