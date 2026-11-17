@@ -1,0 +1,129 @@
+--- a/main.go
++++ b/main.go
+@@ -252,6 +252,7 @@
+ 		mSpeedD.SetTitle("Напрямую: " + d)
+ 		mSpeedD.Show()
+ 	}
++	updateMonitorMenu()
+ 	if guardOn() {
+ 		mGuard.Check()
+ 	} else {
+@@ -313,6 +314,7 @@
+ 	mSpeedD = tray.AddMenuItem("", "")
+ 	mSpeedD.Disable()
+ 	mSpeedD.Hide()
++	addMonitorMenu()
+ 	for _, p := range listProfiles() {
+ 		it := mServer.AddSubMenuItemCheckbox(profileTitle(p), "", false)
+ 		profileItems[p] = it
+@@ -434,6 +436,7 @@
+ 
+ 	go loop()
+ 	go updateLoop()
++	go monitorLoop()
+ }
+ 
+ func reloadProfilesHint() {
+@@ -468,6 +471,7 @@
+ 	}
+ 	defer endBusy()
+ 	setInfo("")
++	connLog("пользователь: «Включить VPN»")
+ 	if err := startTunnel(); err != nil {
+ 		setInfo("Туннель не запустился: " + err.Error())
+ 		refresh()
+@@ -492,6 +496,7 @@
+ 		return
+ 	}
+ 	defer endBusy()
++	connLog("пользователь: «Выключить VPN»")
+ 	setGuard(false)
+ 	if err := setProxy(false); err != nil {
+ 		setInfo("Прокси: " + err.Error())
+@@ -537,6 +542,7 @@
+ 		setInfo("Не записать конфиг: " + err.Error())
+ 		return
+ 	}
++	connLog("пользователь: переключение на сервер %s", name)
+ 	if err := restartTunnel(); err != nil {
+ 		log.Println("restart:", err)
+ 	}
+@@ -630,11 +636,13 @@
+ 	}
+ 	if !tunnelRunning() {
+ 		log.Println("guard: туннель остановлен — запускаю")
++		connLog("сторож: туннель был остановлен — запускаю")
+ 		_ = startTunnel()
+ 		time.Sleep(3 * time.Second)
+ 	}
+ 	if on, _ := proxyState(); !on {
+ 		log.Println("guard: прокси выключен — включаю")
++		connLog("сторож: системный прокси был выключен — включаю")
+ 		if err := setProxy(true); err != nil {
+ 			log.Println("guard: прокси:", err)
+ 		}
+@@ -643,6 +651,7 @@
+ 		tunnelFails++
+ 		if tunnelFails >= 2 && hasNetwork() {
+ 			log.Println("guard: туннель не отвечает — перезапуск")
++			connLog("сторож: туннель не отвечает — перезапускаю")
+ 			_ = restartTunnel()
+ 			tunnelFails = 0
+ 		}
+@@ -728,6 +737,7 @@
+ 	speedMu.Unlock()
+ 	b.WriteString("\n--- система ---\n")
+ 	b.WriteString(platformDiag())
++	b.WriteString(monitorReport())
+ 	b.WriteString("\n--- журнал приложения (последние строки) ---\n")
+ 	b.WriteString(tailFile(filepath.Join(configDir(), "control.log"), 25))
+ 	report := redact(b.String())
+--- a/plat_darwin.go
++++ b/plat_darwin.go
+@@ -31,6 +31,23 @@
+ 	return string(out), err
+ }
+ 
++// tunnelPID — номер процесса туннеля (0, если не запущен); смена номера = туннель перезапускался.
++func tunnelPID() int {
++	out, err := run("launchctl", "print", tunnelLabel())
++	if err != nil {
++		return 0
++	}
++	for _, l := range strings.Split(out, "\n") {
++		l = strings.TrimSpace(l)
++		if strings.HasPrefix(l, "pid = ") {
++			var n int
++			fmt.Sscanf(strings.TrimPrefix(l, "pid = "), "%d", &n)
++			return n
++		}
++	}
++	return 0
++}
++
+ func tunnelRunning() bool {
+ 	_, err := run("launchctl", "print", tunnelLabel())
+ 	return err == nil
+--- a/plat_windows.go
++++ b/plat_windows.go
+@@ -60,6 +60,20 @@
+ 
+ func tunnelRunning() bool { return svcState() == "RUNNING" }
+ 
++// tunnelPID — номер процесса службы (0, если не запущена); смена номера = служба перезапускалась.
++func tunnelPID() int {
++	out, _ := run("sc.exe", "queryex", svcName)
++	for _, l := range strings.Split(out, "\n") {
++		if strings.Contains(l, "PID") {
++			f := strings.Fields(l)
++			var n int
++			fmt.Sscanf(f[len(f)-1], "%d", &n)
++			return n
++		}
++	}
++	return 0
++}
++
+ func waitState(want string, d time.Duration) bool {
+ 	end := time.Now().Add(d)
+ 	for time.Now().Before(end) {

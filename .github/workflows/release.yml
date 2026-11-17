@@ -1,5 +1,6 @@
 # Каждый push в main: сборка для macOS (Apple Silicon) и Windows и новый релиз 1.1.<номер сборки>.
 # Приложение само проверяет последний релиз и обновляется.
+# Файлы patches/*.patch сначала применяются к коду и удаляются (так удобнее присылать небольшие правки).
 name: release
 on:
   push:
@@ -13,6 +14,21 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Применить патчи из patches/ (если есть) и закоммитить
+        run: |
+          shopt -s nullglob
+          P=(patches/*.patch)
+          [ ${#P[@]} -eq 0 ] && { echo "патчей нет"; exit 0; }
+          for p in "${P[@]}"; do
+            echo "== $p"
+            git apply --whitespace=nowarn "$p" || patch -p1 -F3 < "$p"
+            git rm -q "$p"
+          done
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "применены патчи из patches/"
+          git push
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22.12'
