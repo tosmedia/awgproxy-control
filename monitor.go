@@ -143,7 +143,7 @@ func monitorLoop() {
 				curOutage = &outage{start: time.Now().Add(-probeEvery * (failsToOutage - 1)), directOK: direct, tunnelUp: running}
 				connLog("ОБРЫВ: через туннель нет ответа уже %s; интернет напрямую: %s; процесс туннеля: %s",
 					fmtDur(probeEvery*failsToOutage),
-					map[bool]string{true: "ЕСТЬ (значит, не отвечает M6 или путь до него)", false: "НЕТ (пропал интернет у этого компьютера)"}[direct],
+					directText(direct),
 					map[bool]string{true: "запущен", false: "ОСТАНОВЛЕН"}[running])
 				monMu.Unlock()
 				refresh()
@@ -220,4 +220,11 @@ func monitorReport() string {
 	b.WriteString("журнал связи (последние строки):\n")
 	b.WriteString(tailFile(connLogPath(), 30))
 	return b.String()
+}
+
+func directText(direct bool) string {
+	if killSwitchActive() {
+		return "не проверить (строгий режим закрывает прямой выход)"
+	}
+	return map[bool]string{true: "ЕСТЬ (значит, не отвечает M6 или путь до него)", false: "НЕТ (пропал интернет у этого компьютера)"}[direct]
 }

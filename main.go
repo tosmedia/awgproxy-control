@@ -161,6 +161,7 @@ var (
 	mSpeed, mSpeedT, mSpeedD       *tray.MenuItem
 	mDiag, mFolder, mSetup, mLogin *tray.MenuItem
 	mQuit, mUpdate, mAutoUpd       *tray.MenuItem
+	mKill, mBypass                 *tray.MenuItem
 	profileItems                   = map[string]*tray.MenuItem{}
 	menuReady                      atomic.Bool
 	menuMu                         sync.Mutex
@@ -258,6 +259,21 @@ func updateMenu() {
 	} else {
 		mGuard.Uncheck()
 	}
+	if mKill != nil {
+		if killSwitchActive() {
+			mKill.Check()
+		} else {
+			mKill.Uncheck()
+		}
+		if ksBusy.Load() {
+			mKill.Disable()
+		} else {
+			mKill.Enable()
+		}
+		if killSwitchActive() {
+			mDirect.SetTitle("Напрямую: закрыто (строгий режим)")
+		}
+	}
 	for name, it := range profileItems {
 		if name == s.Profile {
 			it.Check()
@@ -306,6 +322,10 @@ func onReady() {
 	mOff = tray.AddMenuItem("Выключить VPN", "Остановить туннель и выключить системный прокси")
 	mGuard = tray.AddMenuItemCheckbox("Всегда через Армению (сторож)",
 		"В любой сети сам включает прокси и перезапускает туннель", guardOn())
+	if killSwitchSupported() {
+		mKill = tray.AddMenuItemCheckbox("Строгий режим: без Армении — без интернета",
+			"Брандмауэр пропускает наружу только туннель к серверу. Если сервер молчит — интернета нет ни у одной программы", killSwitchActive())
+	}
 	mServer = tray.AddMenuItem("Сервер", "")
 	mSpeed = tray.AddMenuItem("Тест скорости", "Скорость и пинг через Армению и напрямую")
 	mSpeedT = tray.AddMenuItem("", "")
@@ -330,6 +350,9 @@ func onReady() {
 	}
 	tray.AddSeparator()
 	mDiag = tray.AddMenuItem("Проверить и скопировать отчёт", "Отчёт без ключей — можно прислать Claude")
+	if killSwitchSupported() {
+		mBypass = tray.AddMenuItem("Кто ходит мимо Армении?", "Программы, которые сейчас соединяются с интернетом напрямую")
+	}
 	mFolder = tray.AddMenuItem("Открыть папку профилей", "")
 	if setupSupported() {
 		mSetup = tray.AddMenuItem("Настроить права (один раз, нужен администратор)", "")
@@ -371,6 +394,25 @@ func onReady() {
 			}
 		}
 	}()
+	if mKill != nil {
+		go func() {
+			for range mKill.ClickedCh {
+				go toggleKillSwitch()
+			}
+		}()
+		go func() {
+			for range mBypass.ClickedCh {
+				go func() {
+					setInfo("Проверяю соединения программ…")
+					r := bypassCheck()
+					path := filepath.Join(configDir(), "bypass.txt")
+					_ = os.WriteFile(path, []byte(r), 0o600)
+					setInfo("Готово: список в bypass.txt")
+					showFile(path)
+				}()
+			}
+		}()
+	}
 	go func() {
 		for range mDiag.ClickedCh {
 			go diagnose()
@@ -434,9 +476,52 @@ func onReady() {
 		quitApp()
 	}()
 
+	go ksRefresh() // новые профили → новые адреса серверов в строгом режиме
 	go loop()
 	go updateLoop()
 	go monitorLoop()
+}
+
+var ksBusy atomic.Bool
+
+func toggleKillSwitch() {
+	if !ksBusy.CompareAndSwap(false, true) {
+		return
+	}
+	defer func() { ksBusy.Store(false); updateMenu() }()
+	updateMenu()
+	if killSwitchActive() {
+		setInfo("Выключаю строгий режим…")
+		if err := setKillSwitch(false); err != nil {
+			setInfo("Строгий режим не выключился: " + err.Error())
+			return
+		}
+		connLog("пользователь: строгий режим ВЫКЛЮЧЕН")
+		setInfo("Строгий режим выключен")
+		return
+	}
+	s := getStatus()
+	if s.TunnelIP == "" || !s.ProxyOn {
+		setInfo("Сначала включите VPN и дождитесь зелёного значка — иначе интернет пропадёт")
+		return
+	}
+	if ksInstalled() {
+		setInfo("Включаю строгий режим…")
+	} else {
+		setInfo("Первое включение: macOS спросит пароль администратора…")
+	}
+	if err := setKillSwitch(true); err != nil {
+		setInfo("Строгий режим не включён: " + err.Error())
+		return
+	}
+	connLog("пользователь: строгий режим ВКЛЮЧЁН — интернет только через туннель")
+	if !guardOn() {
+		setGuard(true)
+		guardTakeover()
+		go guardPass(true)
+	}
+	setInfo("Строгий режим включён: без Армении интернета нет (сторож тоже включён)")
+	go refresh()
 }
 
 func reloadProfilesHint() {
@@ -498,13 +583,22 @@ func vpnDisable() {
 	defer endBusy()
 	connLog("пользователь: «Выключить VPN»")
 	setGuard(false)
+	ksOff := ""
+	if killSwitchActive() || ksWanted() {
+		if err := setKillSwitch(false); err != nil {
+			setInfo("Строгий режим не выключился: " + err.Error())
+			return
+		}
+		connLog("строгий режим выключен вместе с VPN")
+		ksOff = " и строгий режим"
+	}
 	if err := setProxy(false); err != nil {
 		setInfo("Прокси: " + err.Error())
 	}
 	if err := stopTunnel(); err != nil {
 		setInfo("Туннель: " + err.Error())
 	} else {
-		setInfo("VPN выключен (сторож тоже выключен)")
+		setInfo("VPN выключен (сторож" + ksOff + " тоже выключен)")
 	}
 	refresh()
 }
@@ -548,6 +642,7 @@ func switchProfile(name string) {
 	}
 	if ip := waitTunnel(30 * time.Second); ip != "" {
 		_ = os.WriteFile(activeProfileFile(), []byte(name+"\n"), 0o600)
+		ksRefresh()
 		setInfo("Сервер: " + profileTitle(name) + " — " + ip)
 	} else {
 		_ = os.WriteFile(activeConf(), old, 0o600)
@@ -729,6 +824,7 @@ func diagnose() {
 	fmt.Fprintf(&b, "IP напрямую: %s%s\n", orDash(s.DirectIP), place(s.DirectPlace))
 	fmt.Fprintf(&b, "Системный прокси: %s\n", s.ProxyDetail)
 	fmt.Fprintf(&b, "Сторож: %v\n", map[bool]string{true: "включён", false: "выключен"}[guardOn()])
+	b.WriteString(killSwitchDiag())
 	fmt.Fprintf(&b, "Активный профиль: %s; Endpoint в рабочем конфиге: %s\n", orDash(s.Profile), orDash(endpointOf(activeConf())))
 	fmt.Fprintf(&b, "Профили: %s\n", strings.Join(listProfiles(), ", "))
 	fmt.Fprintf(&b, "Сети: %s\n", netSignature())
